@@ -26,7 +26,7 @@ if (!requireNamespace("BiocManager", quietly = TRUE))
 BiocManager::install(c("BSgenome.Hsapiens.UCSC.hg38", "EnsDb.Hsapiens.v86", 
                        "rtracklayer","GenomicFeatures","plyranges"))
 
-remotes::install_github("satijalab/PASTA")
+remotes::install_github("fcylee/PASTA", ref = "dev")
 ```
 
 # Vignette
