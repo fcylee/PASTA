@@ -183,7 +183,7 @@ merge.polyAsiteAssay <- function(x = NULL,
   meta.merge <- merge(meta.x, meta.y, by="peak.tmp", all=TRUE)
   if (any(!is.na(meta.merge$strand.x) & !is.na(meta.merge$strand.y) &
            meta.merge$strand.x != meta.merge$strand.y)) {
-     warn(message = "Mismatch in strand values for the same feature when merging,
+     warning(message = "Mismatch in strand values for the same feature when merging,
           converting strand to * for that feature")
   }
 
