@@ -77,8 +77,7 @@ GetPolyADbAnnotation <- function(
 
   features <- rownames(object[[assay]]@counts)
   if (  "*" %in% unique(strand(ranges)) ){
-      stop("Exiting. Cannot annotate unstranded PAS. Please remove unstranded PAS.")
-  }
+      warning("\n Cannot annotate unstranded PAS.\n")  }
   if( !all(seqlevelsStyle(ranges) == seqlevelsStyle(GR.polyA.db)) ) {
     if( seqlevelsStyle(ranges)[1] == "UCSC"){
       warning("\n Annotation does not match between ranges and polyAdb.\n Annotation set to USCS.\n")
