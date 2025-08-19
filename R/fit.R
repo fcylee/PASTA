@@ -116,10 +116,29 @@ CalcPolyAResiduals <- function(object,
   res <- lapply(genes, DirichletMultionmial, background.dist=background.dist,
                 m.background = m.background, gene.sum=gene.sum,  ncells = ncells)
 
-  ec <- res[[1]]$ec
-  var <- res[[1]]$var
-  for(i in 2:length(res)) {
-    if (!(is.null(res[[i]]))) {
+  # Find successful results (not NULL)
+  successful_indices <- which(!sapply(res, is.null))
+  
+  if (length(successful_indices) == 0) {
+    stop("No genes successfully fitted with Dirichlet-multinomial model. ",
+         "Try reducing min.counts.background or using fewer features.")
+  }
+  
+  if (verbose && length(successful_indices) < length(genes)) {
+    failed_count <- length(genes) - length(successful_indices)
+    message(paste0("Warning: ", failed_count, " out of ", length(genes), 
+                   " genes failed Dirichlet-multinomial fitting"))
+    message(paste0("Proceeding with ", length(successful_indices), " successful genes"))
+  }
+  
+  # Initialize with first successful result
+  first_success_idx <- successful_indices[1]
+  ec <- res[[first_success_idx]]$ec
+  var <- res[[first_success_idx]]$var
+  
+  # Add remaining successful results
+  if (length(successful_indices) > 1) {
+    for(i in successful_indices[-1]) {
       ec <- cbind(ec, res[[i]]$ec)
       var <- cbind(var, res[[i]]$var)
     }
