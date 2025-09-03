@@ -120,6 +120,8 @@ ReadPolyApipe <- function(counts.file, peaks.file = NULL, sep = c(":",",",":"),
 #' @param selection.method How to calculate polyA residuals. If "residuals" (default),
 #' will rank all polyA sites by their variance and pick at most 1 polyA site per gene.
 #' Otherwise, will use Seurat FindVariableFeatures functions.
+#' @param min.variance Minimum variance threshold for residuals. Only features with variance 
+#' above this threshold will be considered variable. Default is 0.25 (lenient threshold).
 #' @param ... Arguments passed to other methods
 #'
 #' @rdname FindVariableFeatures
@@ -134,6 +136,7 @@ FindVariableFeatures.polyAsiteAssay <- function(
     nfeatures = 2000,
     selection.method = "residuals",
     gene.names = "symbol",
+    min.variance = 0.5,
     ...)
   {
   if (selection.method == "residuals") {
@@ -149,12 +152,31 @@ FindVariableFeatures.polyAsiteAssay <- function(
 
     var <- data.frame(var = apply(object@scale.data, 1, function(x) var(x[x != 0])))
     var$symbol <- object[[]][rownames(var), gene.names]
-    var <- var[order(var$var, decreasing = TRUE), ] #sort by maximum variance
-    var.unique <- var[!duplicated(var$symbol),]
+    
+    # Apply variance threshold
+    var_filtered <- var[var$var > min.variance, ]
+    
+    if (nrow(var_filtered) == 0) {
+      warning("No features pass the minimum variance threshold (", min.variance, 
+              "). Consider lowering min.variance.")
+      VariableFeatures(object) <- character(0)
+      return(object)
+    }
+    
+    # Sort by variance (descending) and select unique genes
+    var_filtered <- var_filtered[order(var_filtered$var, decreasing = TRUE), ]
+    var.unique <- var_filtered[!duplicated(var_filtered$symbol),]
 
-    nfeatures <- min(nfeatures, nrow(x = nrow(var.unique)))
+    # Take min of requested features and available features
+    nfeatures_actual <- min(nfeatures, nrow(var.unique))
+    
+    if (nfeatures_actual < nfeatures) {
+      message("Only ", nfeatures_actual, " features pass variance threshold (", min.variance, 
+              ") out of ", nfeatures, " requested")
+    }
 
-    VariableFeatures(object) <- head(rownames(var.unique), n=nfeatures)
+    VariableFeatures(object) <- head(rownames(var.unique), n=nfeatures_actual)
+    
   } else {
     assay <- as(object = object, Class = "ChromatinAssay")
     tmp <- Seurat::FindVariableFeatures(assay, nfeatures = nfeatures, selection.method = selection.method, ...)
