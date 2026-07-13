@@ -18,6 +18,9 @@
 #' @param min.counts.background Features with at least this many counts in the background cells are included in calculation
 #' @param min.variance Sets minimum variance. Default is 0.1.
 #' @param sample.n Max number of observations to sample in each bin when performing regularization. Default is 1000.
+#' @param mc.cores Number of cores used to fit the Dirichlet-multinomial across
+#' genes in parallel via \code{\link[parallel]{mclapply}}. Default is 1 (serial).
+#' Forking is not available on Windows, where values > 1 fall back to serial.
 #' @param do.center Return the centered residuals. Default is TRUE.
 #' @param do.scale Return the scaled residuals. Default is TRUE.
 #' @param residuals.max Clip residuals above this value. Default is NULL (no clipping).
@@ -28,6 +31,8 @@
 #'
 #' @return Returns a Seurat object with polyAresiduals assay
 #'
+#' @importFrom parallel mclapply
+#' @importFrom Matrix sparseMatrix
 #' @export
 #' @concept residuals
 #'
@@ -39,6 +44,7 @@ CalcPolyAResiduals <- function(object,
                                min.counts.background = 5,
                                min.variance = 0.1,
                                sample.n = 1000,
+                               mc.cores = 1L,
                                do.scale = FALSE,
                                do.center = FALSE,
                                residuals.max = NULL,
@@ -99,7 +105,16 @@ CalcPolyAResiduals <- function(object,
   m <- LayerData(object = object, assay=assay, layer="counts")
   m <- m[background.dist$peak,]
   #m <- m[order(match(rownames(m), background.dist$peak)), ]
-  gene.sum <- rowsum(m, group=background.dist$gene)
+  # sum counts within each gene using a sparse gene-by-peak indicator matrix.
+  # This keeps m sparse instead of densifying it to a peaks x cells matrix as
+  # rowsum() would.
+  gene.factor <- factor(background.dist$gene)
+  gene.indicator <- sparseMatrix(i = as.integer(gene.factor),
+                                 j = seq_along(gene.factor),
+                                 x = 1,
+                                 dims = c(nlevels(gene.factor), nrow(m)))
+  gene.sum <- as.matrix(gene.indicator %*% m)
+  rownames(gene.sum) <- levels(gene.factor)
   genes <- rownames(gene.sum)
 
   ##############################################################################
@@ -110,42 +125,44 @@ CalcPolyAResiduals <- function(object,
 
   ncells = dim(object)[2]
   background.cells <- WhichCells(object, idents=background)
-  m.background <- as.matrix(m[,background.cells], nrow = nrow(m))
+  # keep the background matrix sparse; DirichletMultionmial densifies only the
+  # small per-gene submatrix it needs, rather than holding a full dense copy
+  m.background <- m[, background.cells, drop = FALSE]
 
-  #fit dirichlet multionmial for each gene
-  res <- lapply(genes, DirichletMultionmial, background.dist=background.dist,
-                m.background = m.background, gene.sum=gene.sum,  ncells = ncells)
+  # precompute the peaks belonging to each gene once, so the per-gene fit does
+  # not rescan every rowname (avoids O(genes x peaks) lookups)
+  peaks.by.gene <- split(background.dist$peak, background.dist$gene)
+
+  # fit dirichlet multinomial for each gene. Genes are independent, so this is
+  # parallelized across cores when mc.cores > 1.
+  res <- parallel::mclapply(genes, DirichletMultionmial,
+                            peaks.by.gene = peaks.by.gene,
+                            m.background = m.background, gene.sum = gene.sum,
+                            ncells = ncells, mc.cores = mc.cores)
 
   # Find successful results (not NULL)
-  successful_indices <- which(!sapply(res, is.null))
-  
+  successful_indices <- which(!vapply(res, is.null, logical(1)))
+
   if (length(successful_indices) == 0) {
     stop("No genes successfully fitted with Dirichlet-multinomial model. ",
          "Try reducing min.counts.background or using fewer features.")
   }
-  
+
   if (verbose && length(successful_indices) < length(genes)) {
     failed_count <- length(genes) - length(successful_indices)
-    message(paste0("Warning: ", failed_count, " out of ", length(genes), 
+    message(paste0("Warning: ", failed_count, " out of ", length(genes),
                    " genes failed Dirichlet-multinomial fitting"))
     message(paste0("Proceeding with ", length(successful_indices), " successful genes"))
   }
-  
-  # Initialize with first successful result
-  first_success_idx <- successful_indices[1]
-  ec <- res[[first_success_idx]]$ec
-  var <- res[[first_success_idx]]$var
-  
-  # Add remaining successful results
-  if (length(successful_indices) > 1) {
-    for(i in successful_indices[-1]) {
-      ec <- cbind(ec, res[[i]]$ec)
-      var <- cbind(var, res[[i]]$var)
-    }
-  }
 
-  ec <- t(ec)
-  var <- t(var)
+  # assemble expected-count and variance matrices (peaks x cells) in a single
+  # allocation instead of growing them with cbind() in a loop. Each successful
+  # result is already oriented peaks x cells, so no transpose is needed.
+  res <- res[successful_indices]
+  ec  <- do.call(rbind, lapply(res, `[[`, "ec"))
+  var <- do.call(rbind, lapply(res, `[[`, "var"))
+  rm(res)
+
   colnames(ec) <- colnames(object)
   colnames(var) <- colnames(object)
 
@@ -176,7 +193,11 @@ CalcPolyAResiduals <- function(object,
     )
   )]
   residual.matrix <- residual.matrix[features.order,]
-  residual.matrix <- scale(residual.matrix, center=do.center, scale= do.scale )
+  # scale() with center = FALSE and scale = FALSE just copies the matrix, so only
+  # call it when centering or scaling is actually requested
+  if (do.center || do.scale) {
+    residual.matrix <- scale(residual.matrix, center=do.center, scale= do.scale )
+  }
   if (!is.null(residuals.max)) {
     residual.matrix[residual.matrix > residuals.max] <- residuals.max
   }
@@ -189,6 +210,7 @@ CalcPolyAResiduals <- function(object,
   #need to met SetAssayData, GetAssayData for residuals
   LayerData(object, layer = "scale.data") <- residual.matrix
   object <- LogSeuratCommand(object = object)
+  return(object)
 }
 
 
@@ -242,45 +264,53 @@ GetBackgroundDist <- function(object, features, background, gene.names, assay,  
 #' Then calculate expected value and variance for each cell based on estimates from dirichlet multionimial regression.
 #'
 #' @param gene.test which gene to use
-#' @param background.dist dataframe containing the isoform ratios for each
+#' @param peaks.by.gene named list mapping each gene to its peaks
 #' @param m.background matrix of background distribution
 #' @param gene.sum sum of count within each gene for each cell
 #' @param ncells number of cells
 #'
-#' @return Returns a list where first element is matrix of expected values for each peak within the genes,
-#' second value is matrix of variance for each peak within the gene
+#' @return Returns a list where the first element is a peaks x cells matrix of expected
+#' values for each peak within the gene, and the second is the matching peaks x cells
+#' matrix of variances. Returns NULL if the Dirichlet-multinomial fit fails.
 #'
 #' @importFrom MGLM MGLMfit
 #' @concept residuals
 #'
 DirichletMultionmial <- function(
   gene.test,
-  background.dist,
+  peaks.by.gene,
   m.background,
   gene.sum,
   ncells
 ) {
-  peaks <- background.dist$peak[background.dist$gene == gene.test]
-  t <- m.background[rownames(m.background) %in% peaks,]
+  peaks <- peaks.by.gene[[gene.test]]
+  # densify only this gene's (few peaks) x (background cells) submatrix
+  t <- as.matrix(m.background[peaks, , drop = FALSE])
   t <- t(t)
+  # drop background cells with no counts for this gene: a zero-total observation
+  # has Dirichlet-multinomial likelihood 1 and contributes nothing to the fit,
+  # so removing it leaves the estimate unchanged while shrinking the optimizer input
+  t <- t[rowSums(t) > 0, , drop = FALSE]
   fit <- try(compareFit <- suppressWarnings(MGLMfit(t, dist="DM")), silent=TRUE)
 
   if (!inherits(fit, "try-error")) {
     param <- compareFit@estimate
-    sum.p <- sum(param)
-    n <-  as.numeric(gene.sum[gene.test,])
-    expect.tmp <- data.frame(matrix(nrow=ncells, ncol=length(peaks)))
-    var.tmp <- data.frame(matrix(nrow=ncells, ncol=length(peaks)))
-    #calculate expected and variance for each peak
-    for (i in 1:length(peaks)) {
-      expect.x <- n*param[i]/sum.p
-      var.x <- expect.x*(1- param[i]/sum.p)*(n + sum.p)/(1+sum.p)
-      expect.tmp[,i] <- expect.x
-      var.tmp[,i] <- var.x
+    # MGLMfit can drop an all-zero category, returning fewer parameters than
+    # peaks; that gene cannot be mapped back, so skip it (treated as a failed fit)
+    if (length(param) != length(peaks)) {
+      return(NULL)
     }
-    colnames(expect.tmp) <- peaks
-    colnames(var.tmp) <- peaks
-    return(list(ec = expect.tmp, var = var.tmp))
+    sum.p <- sum(param)
+    p <- param / sum.p
+    n <- as.numeric(gene.sum[gene.test, ])
+    # expected counts and variance for every peak (rows) x cell (cols), vectorized.
+    # The arithmetic is ordered to match the original per-peak loop bit-for-bit:
+    #   E[x_ij]   = n_j * param_i / sum.p
+    #   Var[x_ij] = E[x_ij] * (1 - p_i) * (n_j + sum.p) / (1 + sum.p)
+    ec <- outer(param, n) / sum.p
+    var <- ec * (1 - p) * rep(n + sum.p, each = length(param)) / (1 + sum.p)
+    rownames(ec) <- rownames(var) <- peaks
+    return(list(ec = ec, var = var))
   }
 }
 
@@ -371,18 +401,24 @@ RegDMVar <- function(ec,
   grid.var <- cbind(grid.var, grid.out)
   grid.var$n_bin <- rep(1:length(n_grid_midpoints), each = length(ec_grid_midpoints))
   grid.var$ec_bin <- rep(1:length(ec_grid_midpoints), length(n_grid_midpoints))
-  grid.var$ec_n <- paste0(grid.var$ec_bin, "_", grid.var$n_bin)
 
   #now get variance in all data, not just NT
   expected.counts.df$ec.bin <- findInterval(expected.counts.df$expected.counts, ec_grid)
   expected.counts.df$n.bin <- findInterval(expected.counts.df$n, n_grid)
-  expected.counts.df$ec_n <- paste0(expected.counts.df$ec.bin, "_", expected.counts.df$n.bin)
 
-  t3 <- left_join(expected.counts.df, grid.var, by="ec_n")
-  t3$reg.var[is.na(t3$reg.var)] <- t3$md.var[is.na(t3$reg.var)]
-  t3$reg.var.new <- t3$reg.var
-  t3$reg.var.new[t3$reg.var< min.variance] <- min.variance # variance threshold
-  var.fit <- matrix(t3$reg.var.new, nrow=nrow(ec), ncol=ncol(ec))
+  # Look up each observation's regularized variance by its (ec.bin, n.bin) cell
+  # via an integer key + match(), instead of building a "<ec_bin>_<n_bin>" string
+  # for every peak x cell and joining. key.base exceeds any ec bin index, so the
+  # encoding is a bijection and reproduces the string-join matching exactly
+  # (bins outside the grid have no match -> NA -> filled with md.var below).
+  key.base <- length(ec_grid) + 1L
+  grid.key <- grid.var$ec_bin + grid.var$n_bin * key.base
+  obs.key <- expected.counts.df$ec.bin + expected.counts.df$n.bin * key.base
+
+  reg.var <- grid.var$reg.var[match(obs.key, grid.key)]
+  reg.var[is.na(reg.var)] <- expected.counts.df$md.var[is.na(reg.var)]
+  reg.var[reg.var < min.variance] <- min.variance # variance threshold
+  var.fit <- matrix(reg.var, nrow=nrow(ec), ncol=ncol(ec))
   return(var.fit)
 }
 
