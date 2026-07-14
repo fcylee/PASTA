@@ -63,10 +63,29 @@ FindDifferentialPolyA <- function(
 
   features <- features %||% rownames(x = object[[assay]]@scale.data)
   r.matrix <- object[[assay]]@scale.data
-  df$ident <- relevel(df$ident, ref = ident.2)
 
+  # only test features that actually have residuals in scale.data
+  missing.features <- setdiff(features, rownames(r.matrix))
+  if (length(missing.features) > 0) {
+    warning(length(missing.features), " of ", length(features),
+            " requested features have no residuals in scale.data and will be skipped ",
+            "(run CalcPolyAResiduals on them first). e.g. ",
+            paste(head(missing.features, 3), collapse = ", "))
+    features <- intersect(features, rownames(r.matrix))
+  }
+  if (length(features) == 0) {
+    stop("None of the requested features have residuals in scale.data.")
+  }
+
+  df$ident <- relevel(df$ident, ref = ident.2)
   sub <- subset(df, ident %in% c(ident.1, ident.2))
-  r.matrix.sub <- r.matrix[features,rownames(sub)]
+
+  missing.cells <- setdiff(rownames(sub), colnames(r.matrix))
+  if (length(missing.cells) > 0) {
+    stop(length(missing.cells), " cells in ident.1/ident.2 are not present in ",
+         "scale.data; make sure residuals were calculated for these cells.")
+  }
+  r.matrix.sub <- r.matrix[features, rownames(sub), drop = FALSE]
 
   all.models <- lapply(
     X = 1:nrow(x = r.matrix.sub),
