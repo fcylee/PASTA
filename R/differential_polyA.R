@@ -136,7 +136,7 @@ percentage.usage <- function( object,
   df <- data.frame(peak=features)
   meta <- object[[assay]]@meta.features
   df$symbol <- meta[features,gene.names]
-  df$counts1 <- rowSums(object[[assay]]@counts[df$peak, cells])
+  df$counts1 <- rowSums(object[[assay]]@counts[df$peak, cells, drop = FALSE])
   sum1 <- aggregate(df$counts1, by=list(gene=df$symbol), FUN=sum)
   colnames(sum1) <- c("symbol", "sum")
   df <- merge(df, sum1, by="symbol")
