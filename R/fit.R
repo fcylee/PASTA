@@ -26,6 +26,9 @@
 #' @param residuals.max Clip residuals above this value. Default is NULL (no clipping).
 #' @param residuals.min Clip residuals below this value. Default is NULL (no clipping).
 #' @param number.bins Number of bins used to perform regularization. Default is 30.
+#' @param chunk.size Number of cells processed per block when computing residuals.
+#' Residuals are streamed in column blocks so the large per-cell intermediates are
+#' never all held at once; smaller values lower peak memory. Default is 2000.
 #' @param verbose Print messages.
 #'
 #'
@@ -50,6 +53,7 @@ CalcPolyAResiduals <- function(object,
                                residuals.max = NULL,
                                residuals.min = NULL,
                                number.bins = 30,
+                               chunk.size = 2000,
                                verbose=TRUE)
  {
   if(verbose) {
@@ -134,39 +138,34 @@ CalcPolyAResiduals <- function(object,
   peaks.by.gene <- split(background.dist$peak, background.dist$gene)
 
   # fit dirichlet multinomial for each gene. Genes are independent, so this is
-  # parallelized across cores when mc.cores > 1.
-  res <- parallel::mclapply(genes, DirichletMultionmial,
-                            peaks.by.gene = peaks.by.gene,
-                            m.background = m.background, gene.sum = gene.sum,
-                            ncells = ncells, mc.cores = mc.cores)
+  # parallelized across cores when mc.cores > 1. Each fit returns only its
+  # parameters; expected counts and variances are generated on demand below.
+  fits <- parallel::mclapply(genes, DirichletMultionmial,
+                             peaks.by.gene = peaks.by.gene,
+                             m.background = m.background, mc.cores = mc.cores)
 
-  # Find successful results (not NULL)
-  successful_indices <- which(!vapply(res, is.null, logical(1)))
-
-  if (length(successful_indices) == 0) {
+  successful <- !vapply(fits, is.null, logical(1))
+  if (!any(successful)) {
     stop("No genes successfully fitted with Dirichlet-multinomial model. ",
          "Try reducing min.counts.background or using fewer features.")
   }
-
-  if (verbose && length(successful_indices) < length(genes)) {
-    failed_count <- length(genes) - length(successful_indices)
+  if (verbose && sum(successful) < length(genes)) {
+    failed_count <- length(genes) - sum(successful)
     message(paste0("Warning: ", failed_count, " out of ", length(genes),
                    " genes failed Dirichlet-multinomial fitting"))
-    message(paste0("Proceeding with ", length(successful_indices), " successful genes"))
+    message(paste0("Proceeding with ", sum(successful), " successful genes"))
   }
+  fits <- fits[successful]
 
-  # assemble expected-count and variance matrices (peaks x cells) in a single
-  # allocation instead of growing them with cbind() in a loop. Each successful
-  # result is already oriented peaks x cells, so no transpose is needed.
-  res <- res[successful_indices]
-  ec  <- do.call(rbind, lapply(res, `[[`, "ec"))
-  var <- do.call(rbind, lapply(res, `[[`, "var"))
-  rm(res)
-
-  colnames(ec) <- colnames(object)
-  colnames(var) <- colnames(object)
-
-  m <- m[rownames(ec),]
+  # Per-peak parameter vectors (aligned to peaks.kept). Gene totals are looked up
+  # by name via gene.idx, so the calculation does not depend on background.dist
+  # being ordered the same way as the fitted genes.
+  peaks.kept <- unlist(lapply(fits, `[[`, "peaks"), use.names = FALSE)
+  param.peak <- unlist(lapply(fits, `[[`, "param"), use.names = FALSE)
+  sump.peak  <- unlist(lapply(fits, function(z) rep(z$sum.p, length(z$peaks))), use.names = FALSE)
+  pfrac      <- param.peak / sump.peak
+  gene.of.peak <- background.dist$gene[match(peaks.kept, background.dist$peak)]
+  gene.idx     <- match(gene.of.peak, rownames(gene.sum))
 
   ##############################################################################
   ### regularize dirichlet multinomial variance
@@ -174,16 +173,31 @@ CalcPolyAResiduals <- function(object,
     message("Regularizing Dirichlet Multionmial Variance")
   }
 
-  var.reg <- RegDMVar(ec = ec, var = var, m = m, m.background = m.background,
-                      background.dist = background.dist,
-                      gene.sum = gene.sum, background.cells = background.cells,
-                      min.variance = min.variance,
-                      number.bins = number.bins,
-                      sample.n = sample.n)
-  #calculate residual matrix
-  residual.matrix <- (m-ec) / sqrt(var.reg)
-  residual.matrix <- as.matrix(residual.matrix, nrow = nrow(residual.matrix))
-  #M1 <- as(residual.matrix, "dgCMatrix")
+  # Build the variance-regularization grid once, from the background cells only.
+  grid <- BuildVarGrid(param.peak = param.peak, sump.peak = sump.peak, pfrac = pfrac,
+                       gene.idx = gene.idx, gene.sum = gene.sum,
+                       background.cells = background.cells,
+                       number.bins = number.bins, sample.n = sample.n)
+
+  ##############################################################################
+  # Compute residuals in blocks of cells so the peaks x cells intermediates
+  # (expected counts, variance, regularized variance) never all coexist.
+  residual.matrix <- matrix(0, nrow = length(peaks.kept), ncol = ncells,
+                            dimnames = list(peaks.kept, colnames(object)))
+  for (start in seq(1, ncells, by = chunk.size)) {
+    cols <- start:min(start + chunk.size - 1L, ncells)
+    n.block  <- gene.sum[gene.idx, cols, drop = FALSE]
+    ec.block <- (n.block * param.peak) / sump.peak
+    v.block  <- ec.block * (1 - pfrac) * (n.block + sump.peak) / (1 + sump.peak)
+    obs.key  <- findInterval(as.vector(ec.block), grid$ec_grid) +
+                findInterval(as.vector(n.block), grid$n_grid) * grid$key.base
+    reg.var  <- grid$grid.var[match(obs.key, grid$grid.key)]
+    na.var   <- is.na(reg.var)
+    reg.var[na.var] <- as.vector(v.block)[na.var]
+    reg.var[reg.var < min.variance] <- min.variance
+    counts.block <- as.matrix(m[peaks.kept, cols, drop = FALSE])
+    residual.matrix[, cols] <- (counts.block - ec.block) / sqrt(matrix(reg.var, nrow = length(peaks.kept)))
+  }
 
   #change to same order as counts slot
   features.order <- rownames(residual.matrix)[order(
@@ -258,20 +272,19 @@ GetBackgroundDist <- function(object, features, background, gene.names, assay,  
 }
 
 
-#' Run Dirichlet Multinomial Distribution
+#' Fit Dirichlet Multinomial Distribution
 #'
-#' Fit dirichlet multinomial distribution on each peak within a gene using background cells.
-#' Then calculate expected value and variance for each cell based on estimates from dirichlet multionimial regression.
+#' Fit a Dirichlet-multinomial distribution on the peaks within a gene using the
+#' background cells, and return the fitted parameters. Expected counts and variances
+#' are generated later, on demand, from these parameters.
 #'
 #' @param gene.test which gene to use
 #' @param peaks.by.gene named list mapping each gene to its peaks
-#' @param m.background matrix of background distribution
-#' @param gene.sum sum of count within each gene for each cell
-#' @param ncells number of cells
+#' @param m.background sparse counts matrix restricted to the background cells
 #'
-#' @return Returns a list where the first element is a peaks x cells matrix of expected
-#' values for each peak within the gene, and the second is the matching peaks x cells
-#' matrix of variances. Returns NULL if the Dirichlet-multinomial fit fails.
+#' @return A list with the gene's \code{peaks}, the fitted concentration parameters
+#' \code{param}, and their sum \code{sum.p}. Returns NULL if the fit fails or the
+#' optimizer drops a category.
 #'
 #' @importFrom MGLM MGLMfit
 #' @concept residuals
@@ -279,9 +292,7 @@ GetBackgroundDist <- function(object, features, background, gene.names, assay,  
 DirichletMultionmial <- function(
   gene.test,
   peaks.by.gene,
-  m.background,
-  gene.sum,
-  ncells
+  m.background
 ) {
   peaks <- peaks.by.gene[[gene.test]]
   # densify only this gene's (few peaks) x (background cells) submatrix
@@ -300,126 +311,72 @@ DirichletMultionmial <- function(
     if (length(param) != length(peaks)) {
       return(NULL)
     }
-    sum.p <- sum(param)
-    p <- param / sum.p
-    n <- as.numeric(gene.sum[gene.test, ])
-    # expected counts and variance for every peak (rows) x cell (cols), vectorized.
-    # The arithmetic is ordered to match the original per-peak loop bit-for-bit:
-    #   E[x_ij]   = n_j * param_i / sum.p
-    #   Var[x_ij] = E[x_ij] * (1 - p_i) * (n_j + sum.p) / (1 + sum.p)
-    ec <- outer(param, n) / sum.p
-    var <- ec * (1 - p) * rep(n + sum.p, each = length(param)) / (1 + sum.p)
-    rownames(ec) <- rownames(var) <- peaks
-    return(list(ec = ec, var = var))
+    return(list(peaks = peaks, param = param, sum.p = sum(param)))
   }
 }
 
 
-#' Run Dirichlet Multionmial Distribution
+#' Build the Dirichlet-multinomial variance-regularization grid
 #'
-#' Calculated Pseudobulk Ratios of Each Isoform within a gene for background distribution.
+#' Computes expected counts and Dirichlet-multinomial variances for the background
+#' cells, then fits a smooth variance surface over a regular
+#' (gene-total, expected-count) grid via kernel regression. The returned grid is
+#' used to regularize the variance of every cell when residuals are computed.
 #'
+#' @param param.peak fitted concentration parameter for each (kept) peak
+#' @param sump.peak sum of concentration parameters for each peak's gene
+#' @param pfrac \code{param.peak / sump.peak}, the background fraction for each peak
+#' @param gene.idx row of \code{gene.sum} giving each peak's gene total
+#' @param gene.sum genes x cells matrix of per-gene counts
+#' @param background.cells cells used to estimate the background distribution
+#' @param number.bins number of bins along each grid axis
+#' @param sample.n max observations sampled per bin before kernel regression
 #'
+#' @return A list with the bin edges (\code{ec_grid}, \code{n_grid}), the regularized
+#' variance at each grid cell (\code{grid.var}), the integer keys of those grid cells
+#' (\code{grid.key}), and the key base (\code{key.base}) used to encode (ec, n) bins.
 #'
-#' @return Returns a data frame containing all peaks within genes that have multiple polyA sites that meet min.counts.background criteria
-#'
-#' @importFrom dplyr left_join
 #' @importFrom stats quantile
 #' @importFrom gplm kreg
 #' @concept residuals
 #'
-#'
-RegDMVar <- function(ec,
-                     var, m,
-                     m.background,
-                     background.dist,
-                     gene.sum,
-                     background.cells,
-                     min.variance = min.variance,
-                     number.bins = number.bins,
-                     sample.n = 1000
-                     ) {
-  expected.counts.df <- data.frame(expected.counts = matrix(ec, ncol=1))
-  expected.counts.df$actual <- matrix(m[rownames(ec),], ncol=1)
-  expected.counts.df$md.var <- matrix(var, ncol=1)
+BuildVarGrid <- function(param.peak, sump.peak, pfrac, gene.idx, gene.sum,
+                         background.cells, number.bins, sample.n) {
+  # expected counts and variances for the background cells (peaks x background cells)
+  n.bg  <- gene.sum[gene.idx, background.cells, drop = FALSE]
+  ec.bg <- (n.bg * param.peak) / sump.peak
+  v.bg  <- ec.bg * (1 - pfrac) * (n.bg + sump.peak) / (1 + sump.peak)
 
-  #add n
-  background.dist.tmp <- background.dist[background.dist$peak %in% rownames(ec),]
-  tmp <-  gene.sum[background.dist.tmp$gene,]
-  expected.counts.df$n <- matrix(tmp, ncol=1) #this is breaking
+  ec.v <- as.vector(ec.bg); n.v <- as.vector(n.bg); md.var <- as.vector(v.bg)
+  keep <- n.v > 0
+  ec.v <- ec.v[keep]; n.v <- n.v[keep]; md.var <- md.var[keep]
 
-  #get background distribution
-  ec.background <- ec[,background.cells]
-  ec.background <- matrix(ec.background, ncol=1)
-  ec.background <- data.frame(expected.counts = ec.background)
-  ec.background$peak <- rownames(ec)
-  ec.background$actual <- matrix(m.background[rownames(ec),], ncol=1)
-  ec.background$md.var <- matrix(var[,background.cells], ncol=1)
+  cutoff.ec <- quantile(ec.v, 0.99)
+  cutoff.n  <- quantile(n.v, 0.99)
+  max.n  <- max(n.v[n.v < cutoff.n]);   max.ec <- max(ec.v[ec.v < cutoff.ec])
+  min.n  <- min(n.v[n.v < cutoff.n]);   min.ec <- min(ec.v[ec.v < cutoff.ec])
 
-  tmp <-  gene.sum[background.dist.tmp$gene,background.cells]
-  ec.background$n <- matrix(tmp, ncol=1)
+  lx <- ly <- number.bins
+  n_grid  <- min.n  + (max.n  - min.n)  / lx * 0:lx
+  ec_grid <- min.ec + (max.ec - min.ec) / ly * 0:ly
 
-  ec.background.sub <- ec.background[ec.background$n>0,]
-  cutoff.ec <- quantile(ec.background.sub$expected.counts, 0.99)
-  cutoff.n <- quantile(ec.background.sub$n, 0.99)
-  max.n <- max(ec.background.sub$n[ec.background.sub$n < cutoff.n])
-  max.ec <- max(ec.background.sub$expected.counts[ec.background.sub$expected.counts < cutoff.ec])
+  # subsample within each (ec.bin, n.bin) cell before the kernel regression
+  ec_n <- paste0(findInterval(ec.v, ec_grid), "_", findInterval(n.v, n_grid))
+  sub  <- unlist(lapply(split(seq_along(ec_n), ec_n), sample_within_groups, sample.n = sample.n))
 
-  min.n <- min(ec.background.sub$n[ec.background.sub$n < cutoff.n])
-  min.ec <- min(ec.background.sub$expected.counts[ec.background.sub$expected.counts < cutoff.ec])
-
-  lx <- number.bins
-  ly <- number.bins
-  n_step <- (max.n-min.n)/lx
-  n_grid <- min.n + n_step*0:lx
-  ec_step <- (max.ec-min.ec)/ly
-  ec_grid <- min.ec + ec_step*0:ly
-
-  tmp <- findInterval(ec.background.sub$expected.counts, ec_grid)
-  tmp2 <-  findInterval(ec.background.sub$n, n_grid)
-
-  ec.background.sub$ec.bin <- tmp
-  ec.background.sub$n.bin <- tmp2
-
-  ec.background.sub$ec_n <- paste0(ec.background.sub$ec.bin, "_", ec.background.sub$n.bin)
-  df.sub <- ec.background.sub[unlist(lapply(split(1:nrow(ec.background.sub), ec.background.sub$ec_n),
-                                            sample_within_groups, sample.n = sample.n)), ]
-  x.matrix <- matrix(cbind(df.sub$n, df.sub$expected.counts), ncol=2)
-
-  ### calculate regular grid for kernel estimates
-  n_grid_midpoints <- calculate_midpoints(min.n, max.n, lx)
+  n_grid_midpoints  <- calculate_midpoints(min.n,  max.n,  lx)
   ec_grid_midpoints <- calculate_midpoints(min.ec, max.ec, ly)
+  grid <- matrix(cbind(rep(n_grid_midpoints, length(ec_grid_midpoints)),
+                       rep(ec_grid_midpoints, each = length(n_grid_midpoints))), ncol = 2)
+  mh <- kreg(x = matrix(cbind(n.v[sub], ec.v[sub]), ncol = 2), y = md.var[sub], grid = grid)
 
-  grid <- matrix(cbind(rep(n_grid_midpoints, length(ec_grid_midpoints)),  rep(NA, length(n_grid_midpoints))), ncol=2)
-  grid[,2] <- rep(ec_grid_midpoints, each=length(n_grid_midpoints))
-
-  # calculate regularized estimates on regulatr grid
-  mh <- kreg(x = x.matrix, y = df.sub$md.var, grid = grid)
-  grid.var <- data.frame(reg.var = mh$y)
-  grid.out <- mh$x
-  colnames(grid.out) <- c("n", "ec")
-  grid.var <- cbind(grid.var, grid.out)
-  grid.var$n_bin <- rep(1:length(n_grid_midpoints), each = length(ec_grid_midpoints))
-  grid.var$ec_bin <- rep(1:length(ec_grid_midpoints), length(n_grid_midpoints))
-
-  #now get variance in all data, not just NT
-  expected.counts.df$ec.bin <- findInterval(expected.counts.df$expected.counts, ec_grid)
-  expected.counts.df$n.bin <- findInterval(expected.counts.df$n, n_grid)
-
-  # Look up each observation's regularized variance by its (ec.bin, n.bin) cell
-  # via an integer key + match(), instead of building a "<ec_bin>_<n_bin>" string
-  # for every peak x cell and joining. key.base exceeds any ec bin index, so the
-  # encoding is a bijection and reproduces the string-join matching exactly
-  # (bins outside the grid have no match -> NA -> filled with md.var below).
+  # integer key per grid cell; matches the (ec.bin, n.bin) encoding used at lookup.
+  # key.base exceeds any ec bin index so the encoding is a bijection.
   key.base <- length(ec_grid) + 1L
-  grid.key <- grid.var$ec_bin + grid.var$n_bin * key.base
-  obs.key <- expected.counts.df$ec.bin + expected.counts.df$n.bin * key.base
-
-  reg.var <- grid.var$reg.var[match(obs.key, grid.key)]
-  reg.var[is.na(reg.var)] <- expected.counts.df$md.var[is.na(reg.var)]
-  reg.var[reg.var < min.variance] <- min.variance # variance threshold
-  var.fit <- matrix(reg.var, nrow=nrow(ec), ncol=ncol(ec))
-  return(var.fit)
+  ec_bin <- rep(1:length(ec_grid_midpoints), length(n_grid_midpoints))
+  n_bin  <- rep(1:length(n_grid_midpoints), each = length(ec_grid_midpoints))
+  list(ec_grid = ec_grid, n_grid = n_grid, grid.var = mh$y,
+       grid.key = ec_bin + n_bin * key.base, key.base = key.base)
 }
 
 

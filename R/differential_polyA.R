@@ -72,9 +72,21 @@ FindDifferentialPolyA <- function(
     X = 1:nrow(x = r.matrix.sub),
     FUN = function(i) {
       sub$residuals <- as.numeric(r.matrix.sub[i, ])
-      model <- lm(residuals ~  .,  data=sub)
+      peak.name <- rownames(r.matrix.sub)[i]
 
-      to_return <- data.frame(summary(model)$coefficients)
+      model.summary <- withCallingHandlers(
+        {
+          model <- lm(residuals ~ ., data = sub)
+          summary(model)
+        },
+        warning = function(w) {
+          message(sprintf("[%s vs %s | %s] %s",
+                          ident.1, ident.2, peak.name, conditionMessage(w)))
+          invokeRestart("muffleWarning")
+        }
+      )
+
+      to_return <- data.frame(model.summary$coefficients)
       to_return$coefficients <- rownames(to_return)
       colnames(to_return) <- c("Estimate", "std_error", "t", "p.value", "coefficient")
       to_return$peak <- rownames(r.matrix.sub)[i]
