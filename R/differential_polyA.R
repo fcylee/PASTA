@@ -93,6 +93,30 @@ FindDifferentialPolyA <- function(
             "; returning NULL and skipping this comparison.")
     return(NULL)
   }
+
+  # drop factor levels no longer present after subsetting/cell filtering
+  sub <- droplevels(sub)
+
+  # both groups must still be represented, or the ident contrast is undefined
+  if (nlevels(sub$ident) < 2) {
+    warning("Only one of ", ident.1, " / ", ident.2,
+            " has cells with residuals; returning NULL and skipping this comparison.")
+    return(NULL)
+  }
+
+  # covariates that are constant in this subset break lm() contrasts and add
+  # nothing to the model; drop them (with a note) so the comparison still runs
+  if (!is.null(covariates)) {
+    const.cov <- covariates[vapply(covariates,
+                                   function(cv) length(unique(sub[[cv]])) < 2,
+                                   logical(1))]
+    if (length(const.cov) > 0) {
+      warning("Dropping covariate(s) constant in ", ident.1, " vs ", ident.2,
+              ": ", paste(const.cov, collapse = ", "))
+      sub <- sub[, setdiff(colnames(sub), const.cov), drop = FALSE]
+    }
+  }
+
   r.matrix.sub <- r.matrix[features, rownames(sub), drop = FALSE]
 
   all.models <- lapply(
