@@ -83,8 +83,15 @@ FindDifferentialPolyA <- function(
 
   missing.cells <- setdiff(rownames(sub), colnames(r.matrix))
   if (length(missing.cells) > 0) {
-    stop(length(missing.cells), " cells in ident.1/ident.2 are not present in ",
-         "scale.data; make sure residuals were calculated for these cells.")
+    warning(length(missing.cells), " of ", nrow(sub),
+            " cells in ident.1/ident.2 have no residuals in scale.data and will be ",
+            "dropped from the test (they were likely filtered during CalcPolyAResiduals).")
+    sub <- sub[setdiff(rownames(sub), missing.cells), , drop = FALSE]
+  }
+  if (nrow(sub) == 0) {
+    warning("No cells with residuals remain for ", ident.1, " vs ", ident.2,
+            "; returning NULL and skipping this comparison.")
+    return(NULL)
   }
   r.matrix.sub <- r.matrix[features, rownames(sub), drop = FALSE]
 
