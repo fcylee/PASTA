@@ -78,6 +78,7 @@ FindDifferentialPolyA <- function(
   }
 
   df$ident <- relevel(df$ident, ref = ident.2)
+
   sub <- subset(df, ident %in% c(ident.1, ident.2))
 
   missing.cells <- setdiff(rownames(sub), colnames(r.matrix))
@@ -139,7 +140,7 @@ FindDifferentialPolyA <- function(
   main.effects$p_val_adj[main.effects$p_val_adj  > 1] <- 1
 
   rownames(main.effects) <- main.effects$peak
-  main.effects.return <- main.effects[,c("Estimate", "p.value", "p_val_adj", "percent.1", "percent.2", "symbol")]
+  main.effects.return <- main.effects[,c("Estimate", "std_error", "p.value", "p_val_adj", "percent.1", "percent.2", "symbol")]
 
   #order by p-value
   main.effects.return <- main.effects.return[ with(main.effects.return, order(p_val_adj, -Estimate)),]
