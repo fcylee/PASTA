@@ -13,11 +13,25 @@
 #' @param features Features to test. Default is all features. If a subset of
 #' features is provided, pct.1 and pct.2 will be calculated using all features
 #' with the same gene annotation where residuals have been calculated.
-#' @param covariates Vector of covariates to include in linear model.
+#' @param covariates Vector of covariates to adjust for (e.g. "sex"). Do NOT put
+#' the group.by.sample column here.
+#' @param group.by.sample Optional metadata column identifying which sample /
+#' animal each cell came from (e.g. "sample_id"). Cells from the same sample are
+#' not independent observations, so treating every cell as independent
+#' overstates confidence (pseudo-replication). Setting this fits a mixed model
+#' (via lmerTest) that accounts for that grouping, so the test reflects the
+#' number of samples rather than the number of cells. When NULL (default) an
+#' ordinary lm treating each cell as independent is used. For a given comparison
+#' with too few samples or too few cells per sample to estimate the grouping
+#' (see min.groups / min.cells.per.group), it falls back to lm automatically.
+#' @param min.groups Minimum number of samples needed to fit the mixed model;
+#' below this it falls back to lm. Default 3.
+#' @param min.cells.per.group Minimum mean cells per sample needed to fit the
+#' mixed model; below this it falls back to lm. Default 3.
 #' @param gene.names Column name providing gene annotation of each polyA site.
 #' Default is "Gene_Symbol"
 #'
-#' @importFrom stats lm relevel
+#' @importFrom stats lm relevel as.formula
 #'
 #' @rdname FindDifferentialPolyA
 #' @concept differential_polyA
@@ -30,6 +44,9 @@ FindDifferentialPolyA <- function(
     ident.2,
     features = NULL,
     covariates = NULL,
+    group.by.sample = NULL,
+    min.groups = 3,
+    min.cells.per.group = 3,
     gene.names = "Gene_Symbol") {
 
   if( !inherits(object[[assay]], "polyAsiteAssay")){
@@ -59,6 +76,14 @@ FindDifferentialPolyA <- function(
     }
     colnames(df) <- c("ident", covariates)
 
+  }
+
+  if (!is.null(group.by.sample)) {
+    if (is.na(match(group.by.sample, colnames(object[[]])))) {
+      stop("group.by.sample '", group.by.sample, "' not found in meta data.")
+    }
+    df[[group.by.sample]] <- as.factor(
+      object[[]][, match(group.by.sample, colnames(object[[]]))])
   }
 
   features <- features %||% rownames(x = object[[assay]]@scale.data)
@@ -119,6 +144,38 @@ FindDifferentialPolyA <- function(
 
   r.matrix.sub <- r.matrix[features, rownames(sub), drop = FALSE]
 
+  # decide once per comparison whether to fit a mixed model: the sample grouping
+  # must have enough samples, and enough cells per sample, to be estimable.
+  # Otherwise (or if lmerTest is unavailable) fall back to a plain per-cell lm.
+  fixed.terms <- setdiff(colnames(sub), c("residuals", group.by.sample))
+  use.lmer <- FALSE
+  if (!is.null(group.by.sample)) {
+    n.groups <- length(unique(sub[[group.by.sample]]))
+    cells.per.group <- nrow(sub) / n.groups
+    if (!requireNamespace("lmerTest", quietly = TRUE)) {
+      warning("group.by.sample set but lmerTest is not installed; ",
+              "falling back to fixed-effects lm.")
+    } else if (n.groups < min.groups || cells.per.group < min.cells.per.group) {
+      warning("group.by.sample '", group.by.sample, "' has ", n.groups, " group(s), ",
+              round(cells.per.group, 1), " cells/group for ", ident.1, " vs ",
+              ident.2, "; too few to estimate - falling back to fixed-effects lm.")
+    } else {
+      use.lmer <- TRUE
+    }
+  }
+
+  rhs <- paste(fixed.terms, collapse = " + ")
+  if (use.lmer) {
+    rhs <- paste0(rhs, " + (1 | ", group.by.sample, ")")
+  }
+  form <- as.formula(paste("residuals ~", rhs))
+
+  # record which model actually ran, so the result carries its own provenance
+  # (constant within a comparison; useful when scanning results from a loop)
+  model.used <- if (use.lmer) "lmer" else "lm"
+  n.samples.used <- if (is.null(group.by.sample)) NA_integer_
+                    else length(unique(sub[[group.by.sample]]))
+
   all.models <- lapply(
     X = 1:nrow(x = r.matrix.sub),
     FUN = function(i) {
@@ -127,7 +184,11 @@ FindDifferentialPolyA <- function(
 
       model.summary <- withCallingHandlers(
         {
-          model <- lm(residuals ~ ., data = sub)
+          model <- if (use.lmer) {
+            lmerTest::lmer(form, data = sub)
+          } else {
+            lm(form, data = sub)
+          }
           summary(model)
         },
         warning = function(w) {
@@ -137,11 +198,20 @@ FindDifferentialPolyA <- function(
         }
       )
 
-      to_return <- data.frame(model.summary$coefficients)
-      to_return$coefficients <- rownames(to_return)
-      colnames(to_return) <- c("Estimate", "std_error", "t", "p.value", "coefficient")
-      to_return$peak <- rownames(r.matrix.sub)[i]
-      return(to_return)
+      # index columns by name so this works for both lm (Estimate/Std. Error/
+      # t value/Pr(>|t|)) and lmerTest (which inserts an extra df column)
+      co <- model.summary$coefficients
+      data.frame(
+        Estimate    = co[, "Estimate"],
+        std_error   = co[, "Std. Error"],
+        t           = co[, "t value"],
+        p.value     = co[, "Pr(>|t|)"],
+        coefficient = rownames(co),
+        peak        = peak.name,
+        model       = model.used,
+        n_samples   = n.samples.used,
+        stringsAsFactors = FALSE
+      )
     }
   )
   results <- do.call(rbind, all.models)
@@ -171,7 +241,7 @@ FindDifferentialPolyA <- function(
   main.effects$p_val_adj[main.effects$p_val_adj  > 1] <- 1
 
   rownames(main.effects) <- main.effects$peak
-  main.effects.return <- main.effects[,c("Estimate", "std_error", "p.value", "p_val_adj", "percent.1", "percent.2", "symbol")]
+  main.effects.return <- main.effects[,c("Estimate", "std_error", "p.value", "p_val_adj", "percent.1", "percent.2", "symbol", "model", "n_samples")]
 
   #order by p-value
   main.effects.return <- main.effects.return[ with(main.effects.return, order(p_val_adj, -Estimate)),]

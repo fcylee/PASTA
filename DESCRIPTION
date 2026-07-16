@@ -1,6 +1,6 @@
 Package: PASTA
 Title: PolyA Site usage adjusting for Transcript Abundance
-Version: 0.1.0
+Version: 0.1.1
 Data: 2024-06-24
 Authors@R: c( 
     person(given = "Madeline", family = "Kowalski", email = "mkowalski@nygenome.org", role = c("cre")),
@@ -32,9 +32,10 @@ Depends:
     Seurat (>= 5.0.2),
     Signac (>= 1.13.0),
     SeuratObject (>= 5.0.1)
-Suggests: 
+Suggests:
     knitr,
     rmarkdown,
+    lmerTest,
     testthat (>= 3.0.0)
 VignetteBuilder: knitr
 Config/testthat/edition: 3
