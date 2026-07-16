@@ -182,39 +182,67 @@ FindDifferentialPolyA <- function(
       sub$residuals <- as.numeric(r.matrix.sub[i, ])
       peak.name <- rownames(r.matrix.sub)[i]
 
-      model.summary <- withCallingHandlers(
-        {
-          model <- if (use.lmer) {
-            lmerTest::lmer(form, data = sub)
-          } else {
-            lm(form, data = sub)
+      # a single peak can fail (e.g. lmer singular / non-positive-definite
+      # vcov); catch it so one bad peak skips itself rather than aborting the
+      # whole comparison. warnings are logged and muffled as before. Also record
+      # whether an lmer fit was singular (variance ~0) - if so the sample
+      # grouping wasn't really estimated and the p-value reverts toward the
+      # over-confident per-cell result, so flag it rather than trust it blindly.
+      fit <- tryCatch(
+        withCallingHandlers(
+          {
+            model <- if (use.lmer) {
+              lmerTest::lmer(form, data = sub)
+            } else {
+              lm(form, data = sub)
+            }
+            list(co = summary(model)$coefficients,
+                 singular = if (use.lmer) lme4::isSingular(model) else NA)
+          },
+          warning = function(w) {
+            message(sprintf("[%s vs %s | %s] %s",
+                            ident.1, ident.2, peak.name, conditionMessage(w)))
+            invokeRestart("muffleWarning")
           }
-          summary(model)
-        },
-        warning = function(w) {
-          message(sprintf("[%s vs %s | %s] %s",
-                          ident.1, ident.2, peak.name, conditionMessage(w)))
-          invokeRestart("muffleWarning")
+        ),
+        error = function(e) {
+          message(sprintf("[%s vs %s | %s] fit failed, skipping peak: %s",
+                          ident.1, ident.2, peak.name, conditionMessage(e)))
+          NULL
         }
       )
 
+      # skip the peak if the fit failed or the coefficient table is unusable
+      co <- fit$co
+      if (is.null(co) || !all(c("Estimate", "Std. Error") %in% colnames(co))) {
+        return(NULL)
+      }
+
       # index columns by name so this works for both lm (Estimate/Std. Error/
-      # t value/Pr(>|t|)) and lmerTest (which inserts an extra df column)
-      co <- model.summary$coefficients
+      # t value/Pr(>|t|)) and lmerTest (which inserts an extra df column);
+      # tolerate a missing p-value column (can happen on degenerate vcov)
+      tcol <- if ("t value"  %in% colnames(co)) co[, "t value"]  else NA_real_
+      pcol <- if ("Pr(>|t|)" %in% colnames(co)) co[, "Pr(>|t|)"] else NA_real_
       data.frame(
         Estimate    = co[, "Estimate"],
         std_error   = co[, "Std. Error"],
-        t           = co[, "t value"],
-        p.value     = co[, "Pr(>|t|)"],
+        t           = tcol,
+        p.value     = pcol,
         coefficient = rownames(co),
         peak        = peak.name,
         model       = model.used,
         n_samples   = n.samples.used,
+        is_singular = fit$singular,
         stringsAsFactors = FALSE
       )
     }
   )
   results <- do.call(rbind, all.models)
+  if (is.null(results) || nrow(results) == 0) {
+    warning("No peaks could be fit for ", ident.1, " vs ", ident.2,
+            "; returning NULL and skipping this comparison.")
+    return(NULL)
+  }
   main.effects <- results[grep("ident", results$coefficient),]
 
   gene.idx = match(gene.names, colnames(object[[assay]][[]]))
@@ -241,7 +269,7 @@ FindDifferentialPolyA <- function(
   main.effects$p_val_adj[main.effects$p_val_adj  > 1] <- 1
 
   rownames(main.effects) <- main.effects$peak
-  main.effects.return <- main.effects[,c("Estimate", "std_error", "p.value", "p_val_adj", "percent.1", "percent.2", "symbol", "model", "n_samples")]
+  main.effects.return <- main.effects[,c("Estimate", "std_error", "p.value", "p_val_adj", "percent.1", "percent.2", "symbol", "model", "n_samples", "is_singular")]
 
   #order by p-value
   main.effects.return <- main.effects.return[ with(main.effects.return, order(p_val_adj, -Estimate)),]
