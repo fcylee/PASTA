@@ -164,15 +164,45 @@ FindDifferentialPolyA <- function(
     }
   }
 
-  rhs <- paste(fixed.terms, collapse = " + ")
-  if (use.lmer) {
-    rhs <- paste0(rhs, " + (1 | ", group.by.sample, ")")
-  }
-  form <- as.formula(paste("residuals ~", rhs))
+  rhs.fixed <- paste(fixed.terms, collapse = " + ")
+  form.fixed <- as.formula(paste("residuals ~", rhs.fixed))
+  form.mixed <- if (use.lmer) {
+    as.formula(paste("residuals ~", rhs.fixed, "+ (1 | ", group.by.sample, ")"))
+  } else NULL
 
-  # record which model actually ran, so the result carries its own provenance
-  # (constant within a comparison; useful when scanning results from a loop)
   model.used <- if (use.lmer) "lmer" else "lm"
+
+  # Trial fit: some comparisons are so thin that lmer cannot be estimated at all
+  # (non-positive-definite vcov, which makes lmerTest error on every peak). Probe
+  # once here with the highest-variance peak - the strongest-signal peak, i.e.
+  # the best case for estimating a positive sample variance. If even that peak
+  # fails, weaker peaks certainly will, so run the whole comparison as lm and
+  # flag it "lm_fallback". If it succeeds, keep lmer and let the per-peak net
+  # skip any individual stragglers.
+  if (use.lmer) {
+    row.var <- apply(r.matrix.sub, 1, stats::var)
+    trial.i <- if (all(is.na(row.var) | row.var == 0)) 1L else which.max(row.var)
+    trial.sub <- sub
+    trial.sub$residuals <- as.numeric(r.matrix.sub[trial.i, ])
+    trial.ok <- tryCatch(
+      suppressWarnings(suppressMessages({
+        co <- summary(lmerTest::lmer(form.mixed, data = trial.sub))$coefficients
+        all(c("Estimate", "Std. Error") %in% colnames(co))
+      })),
+      error = function(e) FALSE
+    )
+    if (!isTRUE(trial.ok)) {
+      warning("lmer not estimable for ", ident.1, " vs ", ident.2,
+              " (e.g. non-positive-definite vcov); running lm for all peaks ",
+              "(model = 'lm_fallback').")
+      use.lmer <- FALSE
+      model.used <- "lm_fallback"
+    }
+  }
+
+  form <- if (use.lmer) form.mixed else form.fixed
+
+  # provenance carried on every result row (constant within a comparison)
   n.samples.used <- if (is.null(group.by.sample)) NA_integer_
                     else length(unique(sub[[group.by.sample]]))
 
@@ -192,12 +222,16 @@ FindDifferentialPolyA <- function(
         withCallingHandlers(
           {
             model <- if (use.lmer) {
-              lmerTest::lmer(form, data = sub)
+              # suppressMessages() silences lme4's un-labelled "boundary
+              # (singular) fit" note; we capture singularity in a column below
+              suppressMessages(lmerTest::lmer(form, data = sub))
             } else {
               lm(form, data = sub)
             }
-            list(co = summary(model)$coefficients,
-                 singular = if (use.lmer) lme4::isSingular(model) else NA)
+            list(co        = summary(model)$coefficients,
+                 singular  = if (use.lmer) lme4::isSingular(model) else NA,
+                 converged = if (use.lmer)
+                   is.null(model@optinfo$conv$lme4$messages) else NA)
           },
           warning = function(w) {
             message(sprintf("[%s vs %s | %s] %s",
@@ -233,6 +267,7 @@ FindDifferentialPolyA <- function(
         model       = model.used,
         n_samples   = n.samples.used,
         is_singular = fit$singular,
+        converged   = fit$converged,
         stringsAsFactors = FALSE
       )
     }
@@ -269,7 +304,7 @@ FindDifferentialPolyA <- function(
   main.effects$p_val_adj[main.effects$p_val_adj  > 1] <- 1
 
   rownames(main.effects) <- main.effects$peak
-  main.effects.return <- main.effects[,c("Estimate", "std_error", "p.value", "p_val_adj", "percent.1", "percent.2", "symbol", "model", "n_samples", "is_singular")]
+  main.effects.return <- main.effects[,c("Estimate", "std_error", "p.value", "p_val_adj", "percent.1", "percent.2", "symbol", "model", "n_samples", "is_singular", "converged")]
 
   #order by p-value
   main.effects.return <- main.effects.return[ with(main.effects.return, order(p_val_adj, -Estimate)),]
