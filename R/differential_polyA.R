@@ -28,6 +28,13 @@
 #' below this it falls back to lm. Default 3.
 #' @param min.cells.per.group Minimum mean cells per sample needed to fit the
 #' mixed model; below this it falls back to lm. Default 3.
+#' @param mixed.test How to get p-values from the mixed model (only used when
+#' group.by.sample is set). "satterthwaite" (default) uses lmerTest's
+#' Satterthwaite degrees of freedom - most accurate at small sample counts.
+#' "wald" uses lme4 with a normal-approximation p-value from the t-statistic -
+#' about 2x faster with near-identical estimates (very slightly less
+#' conservative near p = 0.05), and it avoids lmerTest's variance-covariance
+#' failures on degenerate fits.
 #' @param gene.names Column name providing gene annotation of each polyA site.
 #' Default is "Gene_Symbol"
 #'
@@ -47,7 +54,10 @@ FindDifferentialPolyA <- function(
     group.by.sample = NULL,
     min.groups = 3,
     min.cells.per.group = 3,
+    mixed.test = c("satterthwaite", "wald"),
     gene.names = "Gene_Symbol") {
+
+  mixed.test <- match.arg(mixed.test)
 
   if( !inherits(object[[assay]], "polyAsiteAssay")){
     stop(paste0(assay," assay is not a polyAsiteAssay"))
@@ -146,14 +156,16 @@ FindDifferentialPolyA <- function(
 
   # decide once per comparison whether to fit a mixed model: the sample grouping
   # must have enough samples, and enough cells per sample, to be estimable.
-  # Otherwise (or if lmerTest is unavailable) fall back to a plain per-cell lm.
+  # Otherwise (or if the required package is unavailable) fall back to a plain
+  # per-cell lm. "satterthwaite" needs lmerTest; "wald" needs only lme4.
+  need.pkg <- if (mixed.test == "satterthwaite") "lmerTest" else "lme4"
   fixed.terms <- setdiff(colnames(sub), c("residuals", group.by.sample))
   use.lmer <- FALSE
   if (!is.null(group.by.sample)) {
     n.groups <- length(unique(sub[[group.by.sample]]))
     cells.per.group <- nrow(sub) / n.groups
-    if (!requireNamespace("lmerTest", quietly = TRUE)) {
-      warning("group.by.sample set but lmerTest is not installed; ",
+    if (!requireNamespace(need.pkg, quietly = TRUE)) {
+      warning("group.by.sample set but ", need.pkg, " is not installed; ",
               "falling back to fixed-effects lm.")
     } else if (n.groups < min.groups || cells.per.group < min.cells.per.group) {
       warning("group.by.sample '", group.by.sample, "' has ", n.groups, " group(s), ",
@@ -178,8 +190,9 @@ FindDifferentialPolyA <- function(
   # the best case for estimating a positive sample variance. If even that peak
   # fails, weaker peaks certainly will, so run the whole comparison as lm and
   # flag it "lm_fallback". If it succeeds, keep lmer and let the per-peak net
-  # skip any individual stragglers.
-  if (use.lmer) {
+  # skip any individual stragglers. Only needed for the Satterthwaite path -
+  # the Wald path uses lme4, which does not hit the non-positive-definite vcov.
+  if (use.lmer && mixed.test == "satterthwaite") {
     row.var <- apply(r.matrix.sub, 1, stats::var)
     trial.i <- if (all(is.na(row.var) | row.var == 0)) 1L else which.max(row.var)
     trial.sub <- sub
@@ -221,12 +234,16 @@ FindDifferentialPolyA <- function(
       fit <- tryCatch(
         withCallingHandlers(
           {
-            model <- if (use.lmer) {
-              # suppressMessages() silences lme4's un-labelled "boundary
-              # (singular) fit" note; we capture singularity in a column below
+            # suppressMessages() silences lme4's un-labelled "boundary
+            # (singular) fit" note; we capture singularity in a column below.
+            # Satterthwaite uses lmerTest (p-value from Satterthwaite df); wald
+            # uses plain lme4 (p-value derived from the t-statistic below).
+            model <- if (!use.lmer) {
+              lm(form, data = sub)
+            } else if (mixed.test == "satterthwaite") {
               suppressMessages(lmerTest::lmer(form, data = sub))
             } else {
-              lm(form, data = sub)
+              suppressMessages(lme4::lmer(form, data = sub))
             }
             list(co        = summary(model)$coefficients,
                  singular  = if (use.lmer) lme4::isSingular(model) else NA,
@@ -252,11 +269,17 @@ FindDifferentialPolyA <- function(
         return(NULL)
       }
 
-      # index columns by name so this works for both lm (Estimate/Std. Error/
-      # t value/Pr(>|t|)) and lmerTest (which inserts an extra df column);
-      # tolerate a missing p-value column (can happen on degenerate vcov)
-      tcol <- if ("t value"  %in% colnames(co)) co[, "t value"]  else NA_real_
-      pcol <- if ("Pr(>|t|)" %in% colnames(co)) co[, "Pr(>|t|)"] else NA_real_
+      # index columns by name so this works for lm / lmerTest (both carry
+      # Pr(>|t|)) and lme4 (no p-value column - derive a Wald p from the
+      # t-statistic via the normal approximation).
+      tcol <- if ("t value"  %in% colnames(co)) co[, "t value"] else NA_real_
+      pcol <- if ("Pr(>|t|)" %in% colnames(co)) {
+        co[, "Pr(>|t|)"]
+      } else if ("t value" %in% colnames(co)) {
+        2 * stats::pnorm(-abs(co[, "t value"]))
+      } else {
+        NA_real_
+      }
       data.frame(
         Estimate    = co[, "Estimate"],
         std_error   = co[, "Std. Error"],
