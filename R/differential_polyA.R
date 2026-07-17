@@ -35,10 +35,19 @@
 #' about 2x faster with near-identical estimates (very slightly less
 #' conservative near p = 0.05), and it avoids lmerTest's variance-covariance
 #' failures on degenerate fits.
+#' @param p.adjust.method Multiple-testing correction applied to p_val_adj.
+#' "BH" (default) controls the false discovery rate. "bonferroni" controls the
+#' family-wise error rate (much stricter). "IHW" uses Independent Hypothesis
+#' Weighting with mean count per peak as an independent covariate to gain power
+#' over BH; it falls back to BH if the IHW package is unavailable, errors, or
+#' there are fewer than min.ihw.tests tests.
+#' @param min.ihw.tests Minimum number of tested peaks required to use IHW;
+#' below this it falls back to BH (IHW needs enough hypotheses to learn stable
+#' weights). Default 1000.
 #' @param gene.names Column name providing gene annotation of each polyA site.
 #' Default is "Gene_Symbol"
 #'
-#' @importFrom stats lm relevel as.formula
+#' @importFrom stats lm relevel as.formula p.adjust
 #'
 #' @rdname FindDifferentialPolyA
 #' @concept differential_polyA
@@ -55,9 +64,12 @@ FindDifferentialPolyA <- function(
     min.groups = 3,
     min.cells.per.group = 3,
     mixed.test = c("satterthwaite", "wald"),
+    p.adjust.method = c("BH", "bonferroni", "IHW"),
+    min.ihw.tests = 1000,
     gene.names = "Gene_Symbol") {
 
   mixed.test <- match.arg(mixed.test)
+  p.adjust.method <- match.arg(p.adjust.method)
 
   if( !inherits(object[[assay]], "polyAsiteAssay")){
     stop(paste0(assay," assay is not a polyAsiteAssay"))
@@ -323,8 +335,39 @@ FindDifferentialPolyA <- function(
                                 features = features.all.genes,
                                 gene.names = gene.names)
   main.effects$percent.2 <- percent.2[main.effects$peak]
-  main.effects$p_val_adj <- main.effects$p.value * nrow(object[[assay]]@scale.data)
-  main.effects$p_val_adj[main.effects$p_val_adj  > 1] <- 1
+  # multiple-testing correction over the tested peaks. "BH" (default) controls
+  # FDR; "bonferroni" controls FWER; "IHW" weights hypotheses by an independent,
+  # power-related covariate (mean count per peak) to gain power over BH, falling
+  # back to BH if IHW is unavailable, errors, or there are too few tests.
+  m <- nrow(main.effects)
+  adj <- NULL
+  if (p.adjust.method == "IHW") {
+    if (!requireNamespace("IHW", quietly = TRUE)) {
+      warning("p.adjust.method = 'IHW' but IHW is not installed; using BH.")
+    } else if (m < min.ihw.tests) {
+      warning("Only ", m, " tests (< min.ihw.tests = ", min.ihw.tests, ") for ",
+              ident.1, " vs ", ident.2, "; using BH instead of IHW.")
+    } else {
+      # independent covariate: mean count of each peak across the tested cells
+      # (informative about power, independent of the null p-value distribution)
+      peak.cov <- Matrix::rowMeans(
+        object[[assay]]@counts[main.effects$peak, rownames(sub), drop = FALSE])
+      adj <- tryCatch(
+        IHW::adj_pvalues(IHW::ihw(main.effects$p.value, covariates = peak.cov,
+                                  alpha = 0.05)),
+        error = function(e) {
+          warning("IHW failed for ", ident.1, " vs ", ident.2, " (",
+                  conditionMessage(e), "); using BH.")
+          NULL
+        })
+    }
+  }
+  if (is.null(adj)) {
+    # BH for everything except an explicit bonferroni request
+    method <- if (p.adjust.method == "bonferroni") "bonferroni" else "BH"
+    adj <- stats::p.adjust(main.effects$p.value, method = method)
+  }
+  main.effects$p_val_adj <- pmin(adj, 1)
 
   rownames(main.effects) <- main.effects$peak
   main.effects.return <- main.effects[,c("Estimate", "std_error", "p.value", "p_val_adj", "percent.1", "percent.2", "symbol", "model", "n_samples", "is_singular", "converged")]

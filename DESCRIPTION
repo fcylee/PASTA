@@ -36,6 +36,7 @@ Suggests:
     rmarkdown,
     lmerTest,
     lme4,
+    IHW,
     testthat (>= 3.0.0)
 VignetteBuilder: knitr
 Config/testthat/edition: 3
