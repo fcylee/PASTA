@@ -2,33 +2,25 @@
 % Please edit documentation in R/fit.R
 \name{DirichletMultionmial}
 \alias{DirichletMultionmial}
-\title{Run Dirichlet Multinomial Distribution}
+\title{Fit Dirichlet Multinomial Distribution}
 \usage{
-DirichletMultionmial(
-  gene.test,
-  background.dist,
-  m.background,
-  gene.sum,
-  ncells
-)
+DirichletMultionmial(gene.test, peaks.by.gene, m.background)
 }
 \arguments{
 \item{gene.test}{which gene to use}
 
-\item{background.dist}{dataframe containing the isoform ratios for each}
+\item{peaks.by.gene}{named list mapping each gene to its peaks}
 
-\item{m.background}{matrix of background distribution}
-
-\item{gene.sum}{sum of count within each gene for each cell}
-
-\item{ncells}{number of cells}
+\item{m.background}{sparse counts matrix restricted to the background cells}
 }
 \value{
-Returns a list where first element is matrix of expected values for each peak within the genes,
-second value is matrix of variance for each peak within the gene
+A list with the gene's \code{peaks}, the fitted concentration parameters
+\code{param}, and their sum \code{sum.p}. Returns NULL if the fit fails or the
+optimizer drops a category.
 }
 \description{
-Fit dirichlet multinomial distribution on each peak within a gene using background cells.
-Then calculate expected value and variance for each cell based on estimates from dirichlet multionimial regression.
+Fit a Dirichlet-multinomial distribution on the peaks within a gene using the
+background cells, and return the fitted parameters. Expected counts and variances
+are generated later, on demand, from these parameters.
 }
 \concept{residuals}

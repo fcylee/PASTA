@@ -2,13 +2,14 @@
 % Please edit documentation in R/annotation.R
 \name{GetPolyADbAnnotation}
 \alias{GetPolyADbAnnotation}
-\title{Overlap PAS with polyA db}
+\title{Overlap PAS with curated polyA database}
 \usage{
 GetPolyADbAnnotation(
   object,
   assay = "polyA",
   polyAdb.file = NULL,
-  max.dist = 50
+  max.dist = 50,
+  atlas = "polyAdbv3-hg38"
 )
 }
 \arguments{
@@ -16,16 +17,18 @@ GetPolyADbAnnotation(
 
 \item{assay}{Name of polyAsiteAssay}
 
-\item{polyAdb.file}{Location to find polyAdbv3 file}
+\item{polyAdb.file}{Location to find curated polyA atlas file (tsv expected).}
 
-\item{max.dist}{Keep sites within this distance to a polyAdbv3 site. Default is 50 nucleotides.}
+\item{max.dist}{Keep sites within this distance to a curated polyA site in the atlas. Default is 50 nucleotides.}
+
+\item{atlas}{Atlas versions. Supported for "polyAdbv3-hg38", "PolyASitev3.0", "PolyASitev2.0".}
 }
 \value{
 Seurat object with annotated meta.features for polyAsiteAssay. Keeps all features
 in original matrix, but annotations columns will be populated with NAs if a feature does not
-overlap with a polyAdbv3 polyA site within the distance specified my max.dist.
+overlap with a curated polyA site within the distance specified my max.dist.
 }
 \description{
-Overlap PAS with polyA db
+Overlap PAS with curated polyA database
 }
 \concept{annotation}

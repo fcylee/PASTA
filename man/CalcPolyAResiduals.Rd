@@ -13,11 +13,13 @@ CalcPolyAResiduals(
   min.counts.background = 5,
   min.variance = 0.1,
   sample.n = 1000,
+  mc.cores = 1L,
   do.scale = FALSE,
   do.center = FALSE,
   residuals.max = NULL,
   residuals.min = NULL,
   number.bins = 30,
+  chunk.size = 2000,
   verbose = TRUE
 )
 }
@@ -41,6 +43,10 @@ Default is symbol.}
 
 \item{sample.n}{Max number of observations to sample in each bin when performing regularization. Default is 1000.}
 
+\item{mc.cores}{Number of cores used to fit the Dirichlet-multinomial across
+genes in parallel via \code{\link[parallel]{mclapply}}. Default is 1 (serial).
+Forking is not available on Windows, where values > 1 fall back to serial.}
+
 \item{do.scale}{Return the scaled residuals. Default is TRUE.}
 
 \item{do.center}{Return the centered residuals. Default is TRUE.}
@@ -50,6 +56,10 @@ Default is symbol.}
 \item{residuals.min}{Clip residuals below this value. Default is NULL (no clipping).}
 
 \item{number.bins}{Number of bins used to perform regularization. Default is 30.}
+
+\item{chunk.size}{Number of cells processed per block when computing residuals.
+Residuals are streamed in column blocks so the large per-cell intermediates are
+never all held at once; smaller values lower peak memory. Default is 2000.}
 
 \item{verbose}{Print messages.}
 }

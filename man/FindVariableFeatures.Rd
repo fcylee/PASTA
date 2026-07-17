@@ -9,6 +9,7 @@
   nfeatures = 2000,
   selection.method = "residuals",
   gene.names = "symbol",
+  min.variance = 0.5,
   ...
 )
 }
@@ -22,6 +23,9 @@ will rank all polyA sites by their variance and pick at most 1 polyA site per ge
 Otherwise, will use Seurat FindVariableFeatures functions.}
 
 \item{gene.names}{Column in meta features that contains gene names. At most one feature per gene will be selected.}
+
+\item{min.variance}{Minimum variance threshold for residuals. Only features with variance
+above this threshold will be considered variable. Default is 0.5.}
 
 \item{...}{Arguments passed to other methods}
 }

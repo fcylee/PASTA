@@ -12,6 +12,10 @@ FindDifferentialPolyA(
   ident.2,
   features = NULL,
   covariates = NULL,
+  group.by.sample = NULL,
+  min.groups = 3,
+  min.cells.per.group = 3,
+  mixed.test = c("satterthwaite", "wald"),
   gene.names = "Gene_Symbol"
 )
 }
@@ -28,7 +32,32 @@ FindDifferentialPolyA(
 features is provided, pct.1 and pct.2 will be calculated using all features
 with the same gene annotation where residuals have been calculated.}
 
-\item{covariates}{Vector of covariates to include in linear model.}
+\item{covariates}{Vector of covariates to adjust for (e.g. "sex"). Do NOT put
+the group.by.sample column here.}
+
+\item{group.by.sample}{Optional metadata column identifying which sample /
+animal each cell came from (e.g. "sample_id"). Cells from the same sample are
+not independent observations, so treating every cell as independent
+overstates confidence (pseudo-replication). Setting this fits a mixed model
+(via lmerTest) that accounts for that grouping, so the test reflects the
+number of samples rather than the number of cells. When NULL (default) an
+ordinary lm treating each cell as independent is used. For a given comparison
+with too few samples or too few cells per sample to estimate the grouping
+(see min.groups / min.cells.per.group), it falls back to lm automatically.}
+
+\item{min.groups}{Minimum number of samples needed to fit the mixed model;
+below this it falls back to lm. Default 3.}
+
+\item{min.cells.per.group}{Minimum mean cells per sample needed to fit the
+mixed model; below this it falls back to lm. Default 3.}
+
+\item{mixed.test}{How to get p-values from the mixed model (only used when
+group.by.sample is set). "satterthwaite" (default) uses lmerTest's
+Satterthwaite degrees of freedom - most accurate at small sample counts.
+"wald" uses lme4 with a normal-approximation p-value from the t-statistic -
+about 2x faster with near-identical estimates (very slightly less
+conservative near p = 0.05), and it avoids lmerTest's variance-covariance
+failures on degenerate fits.}
 
 \item{gene.names}{Column name providing gene annotation of each polyA site.
 Default is "Gene_Symbol"}

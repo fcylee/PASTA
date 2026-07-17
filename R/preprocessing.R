@@ -120,8 +120,8 @@ ReadPolyApipe <- function(counts.file, peaks.file = NULL, sep = c(":",",",":"),
 #' @param selection.method How to calculate polyA residuals. If "residuals" (default),
 #' will rank all polyA sites by their variance and pick at most 1 polyA site per gene.
 #' Otherwise, will use Seurat FindVariableFeatures functions.
-#' @param min.variance Minimum variance threshold for residuals. Only features with variance 
-#' above this threshold will be considered variable. Default is 0.25 (lenient threshold).
+#' @param min.variance Minimum variance threshold for residuals. Only features with variance
+#' above this threshold will be considered variable. Default is 0.5.
 #' @param ... Arguments passed to other methods
 #'
 #' @rdname FindVariableFeatures
