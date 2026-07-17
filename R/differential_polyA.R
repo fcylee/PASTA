@@ -335,6 +335,13 @@ FindDifferentialPolyA <- function(
                                 features = features.all.genes,
                                 gene.names = gene.names)
   main.effects$percent.2 <- percent.2[main.effects$peak]
+
+  # mean count per tested peak across the comparison's cells. Stored on every
+  # row so any covariate-based correction (IHW, independent filtering) can be
+  # redone offline from the result table alone, without the original object.
+  main.effects$mean_count <- Matrix::rowMeans(
+    object[[assay]]@counts[main.effects$peak, rownames(sub), drop = FALSE])
+
   # multiple-testing correction over the tested peaks. "BH" (default) controls
   # FDR; "bonferroni" controls FWER; "IHW" weights hypotheses by an independent,
   # power-related covariate (mean count per peak) to gain power over BH, falling
@@ -348,12 +355,11 @@ FindDifferentialPolyA <- function(
       warning("Only ", m, " tests (< min.ihw.tests = ", min.ihw.tests, ") for ",
               ident.1, " vs ", ident.2, "; using BH instead of IHW.")
     } else {
-      # independent covariate: mean count of each peak across the tested cells
-      # (informative about power, independent of the null p-value distribution)
-      peak.cov <- Matrix::rowMeans(
-        object[[assay]]@counts[main.effects$peak, rownames(sub), drop = FALSE])
+      # independent covariate: mean count of each peak (informative about power,
+      # independent of the null p-value distribution) - the stored column above
       adj <- tryCatch(
-        IHW::adj_pvalues(IHW::ihw(main.effects$p.value, covariates = peak.cov,
+        IHW::adj_pvalues(IHW::ihw(main.effects$p.value,
+                                  covariates = main.effects$mean_count,
                                   alpha = 0.05)),
         error = function(e) {
           warning("IHW failed for ", ident.1, " vs ", ident.2, " (",
@@ -370,7 +376,7 @@ FindDifferentialPolyA <- function(
   main.effects$p_val_adj <- pmin(adj, 1)
 
   rownames(main.effects) <- main.effects$peak
-  main.effects.return <- main.effects[,c("Estimate", "std_error", "p.value", "p_val_adj", "percent.1", "percent.2", "symbol", "model", "n_samples", "is_singular", "converged")]
+  main.effects.return <- main.effects[,c("Estimate", "std_error", "p.value", "p_val_adj", "percent.1", "percent.2", "symbol", "model", "n_samples", "is_singular", "converged", "mean_count")]
 
   #order by p-value
   main.effects.return <- main.effects.return[ with(main.effects.return, order(p_val_adj, -Estimate)),]

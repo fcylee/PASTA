@@ -16,6 +16,8 @@ FindDifferentialPolyA(
   min.groups = 3,
   min.cells.per.group = 3,
   mixed.test = c("satterthwaite", "wald"),
+  p.adjust.method = c("BH", "bonferroni", "IHW"),
+  min.ihw.tests = 1000,
   gene.names = "Gene_Symbol"
 )
 }
@@ -58,6 +60,17 @@ Satterthwaite degrees of freedom - most accurate at small sample counts.
 about 2x faster with near-identical estimates (very slightly less
 conservative near p = 0.05), and it avoids lmerTest's variance-covariance
 failures on degenerate fits.}
+
+\item{p.adjust.method}{Multiple-testing correction applied to p_val_adj.
+"BH" (default) controls the false discovery rate. "bonferroni" controls the
+family-wise error rate (much stricter). "IHW" uses Independent Hypothesis
+Weighting with mean count per peak as an independent covariate to gain power
+over BH; it falls back to BH if the IHW package is unavailable, errors, or
+there are fewer than min.ihw.tests tests.}
+
+\item{min.ihw.tests}{Minimum number of tested peaks required to use IHW;
+below this it falls back to BH (IHW needs enough hypotheses to learn stable
+weights). Default 1000.}
 
 \item{gene.names}{Column name providing gene annotation of each polyA site.
 Default is "Gene_Symbol"}

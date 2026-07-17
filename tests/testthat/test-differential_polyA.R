@@ -36,8 +36,12 @@ test_that("Percentage usage matches manual calculation", {
 
 m2 <- FindDifferentialPolyA(polyA_small, ident.1 =  "A", ident.2 = "B",
                       features = c("12-124911648-124911947", "14-75282887-75283186"))
-test_that("Subsetting features gives same results", {
-  expect_equal(m2, m[c("12-124911648-124911947", "14-75282887-75283186"),])
+test_that("Subsetting features gives same per-peak results", {
+  # p_val_adj is excluded: BH corrects over the set of tests, so a feature
+  # subset (2 tests) legitimately differs from the full run (all tests)
+  cols <- setdiff(colnames(m), "p_val_adj")
+  expect_equal(m2[, cols],
+               m[c("12-124911648-124911947", "14-75282887-75283186"), cols])
 })
 
 # ---- provenance columns / mixed-model paths ---------------------------------
@@ -106,5 +110,37 @@ test_that("wald mixed model runs, never falls back, yields p-values", {
   expect_true(all(mm_wald$n_samples == 6))
   expect_true(all(!is.na(mm_wald$p.value)))          # Wald p from t-statistic
   expect_true(all(is.logical(mm_wald$is_singular)))  # flag populated, not NA
+})
+
+# ---- multiple-testing correction methods ------------------------------------
+
+test_that("default p_val_adj is BH (not the old Bonferroni)", {
+  expect_equal(unname(m$p_val_adj), unname(p.adjust(m$p.value, "BH")))
+})
+
+test_that("bonferroni option matches p.adjust bonferroni over tested peaks", {
+  mb <- FindDifferentialPolyA(polyA_small, ident.1 = "A", ident.2 = "B",
+                              p.adjust.method = "bonferroni")
+  expect_equal(unname(mb$p_val_adj), unname(p.adjust(mb$p.value, "bonferroni")))
+})
+
+test_that("invalid p.adjust.method is rejected", {
+  expect_error(FindDifferentialPolyA(polyA_small, ident.1 = "A", ident.2 = "B",
+                                     p.adjust.method = "holm"))
+})
+
+test_that("IHW falls back to BH when unavailable or too few tests", {
+  # min.ihw.tests set impossibly high forces fallback regardless of IHW install
+  expect_warning(
+    mi <- FindDifferentialPolyA(polyA_small, ident.1 = "A", ident.2 = "B",
+                                p.adjust.method = "IHW", min.ihw.tests = 1e6),
+    regexp = "BH")
+  expect_equal(unname(mi$p_val_adj), unname(p.adjust(mi$p.value, "BH")))
+})
+
+test_that("mean_count covariate column is present and non-negative", {
+  expect_true("mean_count" %in% colnames(m))
+  expect_true(all(m$mean_count >= 0))
+  expect_false(any(is.na(m$mean_count)))
 })
 
